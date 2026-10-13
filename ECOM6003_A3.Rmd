@@ -1,0 +1,248 @@
+---
+title: "ECOM6003_A3"
+author: "Javier Lim"
+date: "2026-10-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load the Packages
+```{r}
+library(readxl)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(urca)
+library(vars)
+```
+
+# Import the ABS Excel File
+```{r}
+raw <- read_excel(
+  "5206025_SFD_Summary.xlsx",
+  sheet = "Data1",
+  col_names = TRUE
+)
+
+dim(raw)
+```
+
+# Find Columns Using Series ID
+```{r}
+which(raw == "A2303111F", arr.ind = TRUE)
+which(raw == "A2303139J", arr.ind = TRUE)
+which(raw == "A2303187A", arr.ind = TRUE)
+which(raw == "A2302956R", arr.ind = TRUE)
+which(raw == "A2302984X", arr.ind = TRUE)
+which(raw == "A2303012X", arr.ind = TRUE)
+
+# Extract the data
+selected <- raw[10:173, c(1, 16, 41, 66, 91, 116, 141)]
+
+names(selected) <- c(
+  "Quarter", "NSW", "VIC", "QLD", "SA", "WA", "TAS"
+)
+
+selected$Quarter <- as.Date(
+  as.numeric(selected$Quarter),
+  origin = "1899-12-30"
+)
+
+# Check data
+head(selected$Quarter)
+tail(selected$Quarter)
+sum(is.na(selected))
+range(selected$Quarter)
+str(selected)
+
+# Convert six SFD columns to numeric
+selected <- selected |>
+  mutate(
+    NSW = as.numeric(NSW),
+    VIC = as.numeric(VIC),
+    QLD = as.numeric(QLD),
+    SA = as.numeric(SA),
+    WA = as.numeric(WA),
+    TAS = as.numeric(TAS)
+  )
+
+str(selected)
+```
+
+# EDA/Descriptive Check
+```{r}
+summary(selected)
+
+# Check for missing value
+colSums(is.na(selected))
+```
+
+```{r}
+# Plot the six SFD series
+plot_data <- selected |>
+  pivot_longer(
+    cols = -Quarter,
+    names_to = "State",
+    values_to = "SFD"
+  )
+
+p <- ggplot(plot_data, aes(x = Quarter, y = SFD, colour = State)) +
+  geom_line(linewidth = 0.8) +
+  scale_y_log10() +
+  labs(
+    title = "State Final Demand Across Australian States",
+    x = "Quarter",
+    y = "State Final Demand ($ million, log scale)"
+  ) +
+  theme_minimal()
+
+ggsave("sfd_levels_log.png", plot = p, width = 8, height = 5, dpi = 300)
+
+# Cleaned CSV
+write.csv(
+  selected,
+  "SFD_clean.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+# Create the train/test split
+train <- selected |>
+  filter(Quarter <= as.Date("2025-06-01"))
+
+test <- selected |>
+  filter(Quarter >= as.Date("2025-09-01"))
+
+# Check
+dim(train)
+dim(test)
+
+range(train$Quarter)
+range(test$Quarter)
+
+sum(is.na(train))
+sum(is.na(test))
+```
+# ADF Stationarity Test
+```{r}
+adf_nsw <- ur.df(
+  train$NSW,
+  type = "trend",
+  lags = 4
+)
+
+summary(adf_nsw)
+
+adf_vic <- ur.df(train$VIC, type = "trend", lags = 4)
+adf_qld <- ur.df(train$QLD, type = "trend", lags = 4)
+adf_sa  <- ur.df(train$SA,  type = "trend", lags = 4)
+adf_wa  <- ur.df(train$WA,  type = "trend", lags = 4)
+adf_tas <- ur.df(train$TAS, type = "trend", lags = 4)
+
+summary(adf_vic)
+summary(adf_qld)
+summary(adf_sa)
+summary(adf_wa)
+summary(adf_tas)
+```
+Since none of the six ADF statistics is more negative than −3.43, we fail to reject H₀ for every state. So, the overall conclusion is: All six SFD series are non-stationary in levels at the 5% significance level.
+
+
+```{r}
+# ADF-test the first differences
+adf_nsw_d1 <- ur.df(diff(train$NSW), type = "drift", lags = 4)
+adf_vic_d1 <- ur.df(diff(train$VIC), type = "drift", lags = 4)
+adf_qld_d1 <- ur.df(diff(train$QLD), type = "drift", lags = 4)
+adf_sa_d1  <- ur.df(diff(train$SA),  type = "drift", lags = 4)
+adf_wa_d1  <- ur.df(diff(train$WA),  type = "drift", lags = 4)
+adf_tas_d1 <- ur.df(diff(train$TAS), type = "drift", lags = 4)
+
+summary(adf_nsw_d1)
+summary(adf_vic_d1)
+summary(adf_qld_d1)
+summary(adf_sa_d1)
+summary(adf_wa_d1)
+summary(adf_tas_d1)
+```
+All six first-differenced SFD series are stationary at the 5% significance level.
+
+# Investigate the Lag-length for the Six-state VAR system
+```{r}
+# Create the six-state training dataset
+train_var <- train |>
+  dplyr::select(NSW, VIC, QLD, SA, WA, TAS)
+
+head(train_var)
+dim(train_var)
+
+# Lag selection
+lag_selection <- VARselect(
+  train_var,
+  lag.max = 8,
+  type = "const"
+)
+
+lag_selection$selection
+lag_selection$criteria
+```
+Preliminary lag selection favours a short lag structure, with HQ and FPE selecting two lags. VAR(2) is therefore used as the initial specification for the cointegration analysis, subject to diagnostic checking.
+
+# Johansen Test
+```{r}
+# Trace test
+johansen_test <- ca.jo(
+  train_var,
+  type = "trace",
+  ecdet = "const",
+  K = 2,
+  spec = "transitory"
+)
+
+summary(johansen_test)
+```
+The Johansen trace test suggests a cointegration rank of r = 3 at the 5% significance level. The current preliminary specification is: Six-variable VECM with cointegration rank 3 and underlying VAR lag order 2.
+
+```{r}
+# Maximum eigenvalue test
+johansen_max <- ca.jo(
+  train_var,
+  type = "eigen",
+  ecdet = "const",
+  K = 2,
+  spec = "transitory"
+)
+
+summary(johansen_max)
+```
+Maximum eigenvalue test suggests r = 1 at the 5% level. 
+
+The Johansen trace test suggested three cointegrating relationships, whereas the maximum-eigenvalue test supported one. Given this difference, the rank selection was treated cautiously, with a rank-one VECM considered the more parsimonious specification and evaluated alongside alternative specifications.
+
+# Sensitivity Check of the Johansen Rank Under VAR(6)
+```{r}
+# Trace test and maximum eigenvalue test for Var(6)
+johansen_k6_trace <- ca.jo(
+  train_var,
+  type = "trace",
+  ecdet = "const",
+  K = 6,
+  spec = "transitory"
+)
+
+summary(johansen_k6_trace)
+
+johansen_k6_eigen <- ca.jo(
+  train_var,
+  type = "eigen",
+  ecdet = "const",
+  K = 6,
+  spec = "transitory"
+)
+
+summary(johansen_k6_eigen)
+```
+Trace consistently suggests 3 cointegrating relationships, while max-eigenvalue consistently suggests 1, under both K = 2 and K = 6. Hence, the test results shows that changing the lag specification from K = 2 to K = 6 does not change the rank conclusions.
